@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.18">
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
   <POU Name="MAIN" Id="{33620bff-f8ff-418a-9b35-0303bd8eb7b6}" SpecialFunc="None">
     <Declaration><![CDATA[PROGRAM MAIN
 VAR
@@ -15,18 +15,40 @@ VAR
     minMass: LREAL;
     {attribute 'pytmc' := 'pv: XBD:N2:CURRENT_MASS'}
     fMassofGas: LREAL;
-
+	{attribute 'pytmc' := 'pv: XBD:N2:MAINTENANCE_MODE'}
+	bMaintenanceMode : BOOL := FALSE;
+	
+	{attribute 'pytmc' := 'pv: XBD:N2:LOW_LEVEL'}
+	fMassLowLevl : LREAL := maxMass / 2;
+	bMassIsLow : BOOL := FALSE;
 
 
     // EL2624 Relayu Logic Here
+	{attribute 'pytmc' := 'pv: XBD:N2:VRC:01'}
     {attribute 'TcLinkTo' := 'TIID^Device 1 (EtherCAT)^Term 1 (EK1200)^Term 5 (EL2624)^Channel 1^Output'}
     rawOutputRelayChan1 AT %Q*: BOOL;
-
+	
+	fbValveTimer : TON;
+	fbCloseValveTimer : TOF;
+	
+	bInit : BOOL := TRUE;
+	iState : INT  := 0;
 
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[fbGetmA(
+      <ST><![CDATA[IF bInit THEN
+	maxMass := 500;
+	minMass := 0;
+	bInit := FALSE;
+	fbValveTimer.PT := T#1m; // SET FOR 1 MIN FOR TESTING
+	fbCloseValveTimer.PT := T#1s; // TIME VALVE SHOULD REMAIN OPEN
+END_IF
+
+fbValveTimer(IN:=TRUE); // RUN TIMER
+fbCloseValveTimer(IN:= FALSE); // RUN OFF TIMER
+
+fbGetmA(
     iRaw := rawInputmA,
     iTermBits := 12,
     fTermMax := 20,
@@ -34,12 +56,49 @@ END_VAR
     fReal => fmA
 );
 
-maxMass := 500;
-minMass := 0;
-
 fMassofGas := (fmA - 4.0) / 16.0 * maxMass + minMass;
 
-rawOutputRelayChan1 := TRUE;]]></ST>
+CASE iState OF
+	0: // INIT
+	fbValveTimer(IN:=FALSE); //RESTART TIMER
+	IF NOT bMaintenanceMode THEN
+		iState := 2;
+	END_IF
+	
+	1: // MAINTINANCE MODE
+	IF NOT bMaintenanceMode THEN
+		iState := 0;
+		fbCloseValveTimer(IN:= TRUE); // ACTUATE VALE AFTER EXIT MAINTINACE MODE
+	END_IF
+	
+	2: // OP MODE
+	
+	IF fMassofGas < fMassLowLevl THEN bMassIsLow := TRUE; ELSE bMassIsLow := FALSE; END_IF;
+		
+	rawOutputRelayChan1 := NOT bMassIsLow; // OPEN IF MASS IS NOT LOW and CLOSE IF MASS IS LOW
+	
+	IF bMassIsLow AND fbCloseValveTimer.Q THEN
+		rawOutputRelayChan1 := fbCloseValveTimer.Q;
+	END_IF
+	
+	IF NOT bMassIsLow AND fbCloseValveTimer.Q THEN
+		rawOutputRelayChan1 := NOT fbCloseValveTimer.Q;
+	END_IF
+	
+	// ACTUAVE VALVE EVERY 24 HOURS 
+	IF fbValveTimer.Q THEN
+		fbValveTimer(IN:=FALSE); //RESTART TIMER
+		fbCloseValveTimer(IN:= TRUE); // RUN OFF TIMER
+	END_IF
+	
+	IF bMaintenanceMode THEN
+		iState := 1;
+		rawOutputRelayChan1 := FALSE; // CLOSE VALVE WHEN ENTERING MAINTINANCE MODE
+	END_IF
+END_CASE
+
+
+]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>
